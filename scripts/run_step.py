@@ -1,4 +1,4 @@
-from stepper import Stepper_rpi
+from stepper_rpi import Stepper
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import threading
 

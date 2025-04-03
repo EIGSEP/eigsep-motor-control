@@ -1,4 +1,4 @@
-from stepper import Stepper
+from stepper import Stepper_rpi
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import threading
 
@@ -45,8 +45,10 @@ def main_function(pins, d, angle, name, inf=False):
         motor = Stepper(pins)
         motor.motor_calc(d, angle)
         if inf:
+            motor.move(name)
             while True:
                 motor.move(name)
+                motor.check()
         else:
             while True:
                 motor.move(name)

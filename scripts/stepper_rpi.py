@@ -60,15 +60,17 @@ class Stepper:
         """ 
         if self.direction > 0:
             gpio.output(self.direction_pin, self.cw_direction)
+            self.cnt += 1
             print('positive')
         if self.direction < 0:
             gpio.output(self.direction_pin, self.ccw_direction)
+            self.cnt -= 1
             print('negative')
         gpio.output(self.pulse_pin, gpio.HIGH)
         sleep(self.delay)
         gpio.output(self.pulse_pin, gpio.LOW)
         sleep(self.delay)
-        self.cnt += 1
+        #self.cnt += 1
         print(f'{str(name)} step count: {self.cnt}, max step: {self.pulse_amount}')
     
 
@@ -80,9 +82,11 @@ class Stepper:
         ----------
         None
         """
-        if abs(self.cnt) >= 2*self.box_max:
+        if abs(self.cnt) >= abs(2*self.box_max):
             self.direction *= -1
             sleep(3)
+            print('reversing')
+            return 0
         if self.cnt >= abs(self.pulse_amount):
             gpio.output(self.enable_pin, gpio.HIGH)
             print('disabled')

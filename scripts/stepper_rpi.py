@@ -88,6 +88,7 @@ class Stepper:
             print('reversing')
             return 0
         if self.cnt >= abs(self.pulse_amount):
+            gpio.output(self.pulse_pin, gpio.LOW)
             gpio.output(self.enable_pin, gpio.HIGH)
             print('disabled')
             return 0
@@ -101,5 +102,6 @@ class Stepper:
         ----------
         None
         """
+        gpio.output(self.pulse_pin, gpio.LOW)
         gpio.output(self.enable_pin, gpio.HIGH)
 

@@ -73,7 +73,7 @@ def both(name1, name2):
     t1.join()
     t2.join()
 
-if box_angle and antenna_angle != 0: # Rotates both motors
+if box_angle != 0 and antenna_angle != 0: # Rotates both motors
     box_name = 'elevation'
     antenna_name = 'azimuth'
     both(box_name, antenna_name)

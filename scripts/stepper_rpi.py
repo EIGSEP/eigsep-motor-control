@@ -2,6 +2,7 @@ from time import sleep
 import time
 import RPi.GPIO as gpio
 
+
 class Stepper:
     def __init__(self, pin_arr):
         """
@@ -11,9 +12,9 @@ class Stepper:
         -----------
         pin_arr: sequence of integers
             GPIO pin numbers following BCM ordering. Pins correspond to inputs on microstep driver in the following order: direction, pulse, clockwise direction, counterclockwise direction, enable.
-
         """
         self.cnt = 0
+        self.SLEEP = 3
         self.direction_pin   = pin_arr[0]# 20
         self.pulse_pin       = pin_arr[1]# 21
         self.cw_direction    = pin_arr[2]# 0 
@@ -84,10 +85,10 @@ class Stepper:
         """
         if abs(self.cnt) >= abs(2*self.box_max):
             self.direction *= -1
-            sleep(3)
+            sleep(self.SLEEP)
             print('reversing')
             return 0
-        if self.cnt >= abs(self.pulse_amount):
+        if abs(self.cnt) >= abs(self.pulse_amount):
             gpio.output(self.pulse_pin, gpio.LOW)
             gpio.output(self.enable_pin, gpio.HIGH)
             print('disabled')

@@ -1,4 +1,4 @@
-from stepper_rpi import Stepper
+from eigsep_motor_control import Stepper
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import threading
 

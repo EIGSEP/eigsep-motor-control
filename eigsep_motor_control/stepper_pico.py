@@ -8,7 +8,7 @@ class Stepper:
         Class to initialize Pin pins on Raspberry Pi and control stepper
         motor rotations.
 
-        Parameteres
+        Parameters
         -----------
         pin_arr: sequence of integers
             GPIO pin numbers following BCM ordering. Pins correspond to inputs

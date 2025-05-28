@@ -27,7 +27,7 @@ jobs:
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       - name: Test with pytest
         run: |
-          pytest --cov=eigsep_motor_control --cov-report=xml tests
+          pytest --cov=eigsep_motor_control --cov-report=xml --no-cov-on-fail tests
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:

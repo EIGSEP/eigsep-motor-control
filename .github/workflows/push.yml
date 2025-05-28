@@ -25,7 +25,17 @@ jobs:
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      - name: Check for tests
+        id: find_tests
+        run: |
+          if ls tests/test_*.py >/dev/null 2>&1; then
+            echo "found=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "found=false" >>"$GITHUB_OUTPUT"
+          fi
+
       - name: Test with pytest
+        if: steps.find_tests.outputs.found == 'true'
         run: |
           pytest --cov=eigsep_motor_control --cov-report=xml --no-cov-on-fail tests
       - name: Upload coverage to Codecov

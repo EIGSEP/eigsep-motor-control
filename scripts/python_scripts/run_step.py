@@ -33,8 +33,7 @@ parser.add_argument(
 parser.add_argument(
     "-i",
     dest="inf_",
-    type=bool,
-    default=0,
+    action="store_true",
     help="Setting to rotate stepper motor infinitely",
 )
 

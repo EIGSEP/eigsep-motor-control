@@ -12,37 +12,36 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <signal.h>
 
 #define DEFAULT_DELAY    225
 #define DEFAULT_ELEV     0
 #define DEFAULT_AZIM     0
 #define DEFAULT_REPORT   100
 #define DEFAULT_DEVICE  "/dev/ttyACM0"
-#define STEP_ANGLE    1.8f
-#define MICROSTEP     4
-#define GEAR_TEETH  113
+#define STEP_ANGLE     1.8f
+#define MICROSTEP      4
+#define GEAR_TEETH    113
 
-// Raw FD for async-signal-safe STOP
-static int g_serial_fd = -1;
+static FILE *g_write_fp = NULL;  // unbuffered writer to Pico
 
-// Signal handler: send STOP over raw FD, then exit immediately
-static void sigint_handler(int _) {
-    if (g_serial_fd >= 0) {
-        const char *stop = "[\"STOP\"]\n";
-        write(g_serial_fd, stop, strlen(stop));
-        fsync(g_serial_fd);
+// Any user input (followed by Enter) triggers an emergency STOP
+static void *input_thread(void *_) {
+    char buf[128];
+    if (fgets(buf, sizeof(buf), stdin)) {
+        // send STOP JSON
+        fprintf(g_write_fp, "[\"STOP\"]\n");
+        fflush(g_write_fp);
+        printf("[sender] Emergency STOP sent\n");
     }
-    _exit(0);
+    return NULL;
 }
 
-// Scan existing log files to pick highest index and last count
+// Scan for highest-index log and its last count
 static void scan_logs(int *out_idx, int *out_off) {
     DIR *d = opendir(".");
     struct dirent *e;
     int max_idx = -1;
     char last_file[128] = {0};
-
     while ((e = readdir(d))) {
         int idx;
         if      (strcmp(e->d_name, "step_log.txt") == 0) idx = 0;
@@ -54,27 +53,37 @@ static void scan_logs(int *out_idx, int *out_off) {
         }
     }
     closedir(d);
-
     if (max_idx < 0) {
         *out_idx = 0;
         *out_off = 0;
         return;
     }
-
     FILE *f = fopen(last_file, "r");
     int last = 0;
-    char buf[128];
-    while (fgets(buf, sizeof(buf), f)) {
-        char *c = strchr(buf, ',');
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char *c = strchr(line, ',');
         if (c) last = atoi(c + 1);
     }
     fclose(f);
-
     *out_idx = max_idx;
     *out_off = last;
 }
 
-// Print usage and exit
+// Configure serial port to raw 115200 8N1
+static int configure_serial(int fd) {
+    struct termios t;
+    if (tcgetattr(fd, &t) < 0) { perror("tcgetattr"); return -1; }
+    cfsetispeed(&t, B115200); cfsetospeed(&t, B115200);
+    t.c_cflag = (t.c_cflag & ~CSIZE) | CS8;
+    t.c_cflag |= CLOCAL | CREAD;
+    t.c_cflag &= ~(PARENB | PARODD | CSTOPB);
+    t.c_iflag = t.c_oflag = t.c_lflag = 0;
+    t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
+    if (tcsetattr(fd, TCSANOW, &t) < 0) { perror("tcsetattr"); return -1; }
+    return 0;
+}
+
 static void usage(const char *p) {
     fprintf(stderr,
         "Usage: %s [options]\n"
@@ -94,21 +103,20 @@ static void usage(const char *p) {
     exit(1);
 }
 
-// Convert degrees to required pulse count
 static int calc_pulses(int deg) {
     return (int)(MICROSTEP * GEAR_TEETH * abs(deg) / STEP_ANGLE);
 }
 
 typedef struct {
-    FILE    *read_fp;
-    FILE    *logf;
-    int      offset;
-    int      threshold;
-    size_t   max_size;
-    int      index;
+    FILE   *read_fp;
+    FILE   *logf;
+    int     offset;
+    int     threshold;
+    size_t  max_size;
+    int     index;
 } logger_args_t;
 
-// Logger thread: read STATUS lines, timestamp & write to rotating logs
+// Logger thread: read STATUS lines, timestamp & rotate logs as needed
 static void *logger_thread(void *arg) {
     logger_args_t *la = arg;
     char line[128];
@@ -117,11 +125,10 @@ static void *logger_thread(void *arg) {
         int cnt;
         if (sscanf(line, "STATUS %d", &cnt) == 1) {
             int adj = la->offset + cnt;
-
-            // Rotate if file too large
+            // rotate if size exceeded
             if (la->max_size > 0) {
                 struct stat st;
-                if (fstat(fileno(la->logf), &st)==0 &&
+                if (fstat(fileno(la->logf), &st) == 0 &&
                     (size_t)st.st_size >= la->max_size) {
                     fclose(la->logf);
                     la->index++;
@@ -130,40 +137,23 @@ static void *logger_thread(void *arg) {
                     la->logf = fopen(fn, "a+");
                 }
             }
-
             struct timeval tv;
             gettimeofday(&tv, NULL);
             long long us = (long long)tv.tv_sec * 1000000LL + tv.tv_usec;
             fprintf(la->logf, "%lld,%d\n", us, adj);
             fflush(la->logf);
-
             if (adj == la->threshold) break;
         }
     }
     return NULL;
 }
 
-// Configure serial port: raw 115200 8N1
-static int configure_serial(int fd) {
-    struct termios t;
-    if (tcgetattr(fd, &t) < 0) { perror("tcgetattr"); return -1; }
-    cfsetispeed(&t, B115200); cfsetospeed(&t, B115200);
-    t.c_cflag = (t.c_cflag & ~CSIZE) | CS8;
-    t.c_cflag |= CLOCAL | CREAD;
-    t.c_cflag &= ~(PARENB | PARODD | CSTOPB);
-    t.c_iflag = t.c_oflag = t.c_lflag = 0;
-    t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
-    return tcsetattr(fd, TCSANOW, &t) ? (perror("tcsetattr"), -1) : 0;
-}
-
 int main(int argc, char **argv) {
-    signal(SIGINT, sigint_handler);
-
     int    delay    = DEFAULT_DELAY;
     int    deg_e    = DEFAULT_ELEV;
     int    deg_a    = DEFAULT_AZIM;
     int    report   = DEFAULT_REPORT;
-    size_t max_size = 0;
+    size_t maxsz    = 0;
     char  *dev      = DEFAULT_DEVICE;
     int    send_stop= 0;
 
@@ -181,83 +171,81 @@ int main(int argc, char **argv) {
     int c;
     while ((c = getopt_long(argc, argv, "t:e:a:r:m:s:ch", opts, NULL)) != -1) {
         switch (c) {
-            case 't': delay     = atoi(optarg);         break;
-            case 'e': deg_e     = atoi(optarg);         break;
-            case 'a': deg_a     = atoi(optarg);         break;
-            case 'r': report    = atoi(optarg);         break;
-            case 'm': max_size  = strtoul(optarg,0,10); break;
-            case 's': dev       = optarg;               break;
-            case 'c': send_stop = 1;                    break;
+            case 't': delay    = atoi(optarg);      break;
+            case 'e': deg_e    = atoi(optarg);      break;
+            case 'a': deg_a    = atoi(optarg);      break;
+            case 'r': report   = atoi(optarg);      break;
+            case 'm': maxsz    = strtoul(optarg,0,10);break;
+            case 's': dev      = optarg;            break;
+            case 'c': send_stop= 1;                 break;
             default:  usage(argv[0]);
         }
     }
 
-    // If only sending STOP, do so and exit immediately
+    // immediate STOP mode
     if (send_stop) {
-        int fd = open(dev, O_RDWR | O_NOCTTY);
+        int fd = open(dev, O_RDWR|O_NOCTTY);
         if (fd < 0) { perror("open"); return 1; }
-        g_serial_fd = fd;
         configure_serial(fd);
-        const char *stop = "[\"STOP\"]\n";
-        write(fd, stop, strlen(stop));
-        fsync(fd);
-        close(fd);
+        FILE *w = fdopen(fd, "w");
+        setvbuf(w, NULL, _IONBF, 0);
+        fprintf(w, "[\"STOP\"]\n");
+        fclose(w);
         return 0;
     }
 
-    // Else perform a move + logging
+    // otherwise standard move + logging
     int idx, offset;
     scan_logs(&idx, &offset);
 
-    int fd_w = open(dev, O_RDWR | O_NOCTTY);
-    if (fd_w < 0) { perror("open"); return 1; }
-    g_serial_fd = fd_w;
-    if (configure_serial(fd_w) < 0) return 1;
+    int fdw = open(dev, O_RDWR|O_NOCTTY);
+    if (fdw < 0) { perror("open"); return 1; }
+    configure_serial(fdw);
+    int fdr = dup(fdw);
+    g_write_fp = fdopen(fdw, "w");
+    setvbuf(g_write_fp, NULL, _IONBF, 0);
+    FILE *read_fp = fdopen(fdr, "r");
 
-    int fd_r = dup(fd_w);
-    FILE *write_fp = fdopen(fd_w, "w");
-    setvbuf(write_fp, NULL, _IONBF, 0);
-    FILE *read_fp  = fdopen(fd_r, "r");
+    // launch interactive STOP thread
+    pthread_t tid_in;
+    pthread_create(&tid_in, NULL, input_thread, NULL);
+    pthread_detach(tid_in);
 
-    // Prepare rotating log file
-    char logname[128];
-    if (max_size > 0) {
-        snprintf(logname, sizeof(logname), "step_log_%d.txt", idx);
+    // prepare rotating log file
+    char logn[128];
+    if (maxsz > 0) {
+        snprintf(logn, sizeof(logn), "step_log_%d.txt", idx);
         struct stat st;
-        if (stat(logname,&st)==0 && (size_t)st.st_size>=max_size) {
+        if (stat(logn, &st) == 0 && (size_t)st.st_size >= maxsz) {
             idx++;
-            snprintf(logname, sizeof(logname), "step_log_%d.txt", idx);
+            snprintf(logn, sizeof(logn), "step_log_%d.txt", idx);
         }
     } else {
-        strcpy(logname, "step_log.txt");
+        strcpy(logn, "step_log.txt");
     }
-    FILE *logf = fopen(logname, "a+");
+    FILE *logf = fopen(logn, "a+");
 
     int angle     = deg_a != 0 ? deg_a : deg_e;
     int pulses    = calc_pulses(angle);
     int dir       = angle >= 0 ? 1 : -1;
     int threshold = offset + pulses * dir;
 
-    pthread_t tid;
-    logger_args_t la = {
-        .read_fp   = read_fp,
-        .logf      = logf,
-        .offset    = offset,
-        .threshold = threshold,
-        .max_size  = max_size,
-        .index     = idx
-    };
-    pthread_create(&tid, NULL, logger_thread, &la);
+    // start logger thread
+    pthread_t tid_log;
+    logger_args_t la = { read_fp, logf, offset, threshold, maxsz, idx };
+    pthread_create(&tid_log, NULL, logger_thread, &la);
 
+    // send the move command
     unsigned motor = deg_a != 0 ? 1U : 0U;
-    fprintf(write_fp,
+    fprintf(g_write_fp,
         "{\"delay\":%u,\"pulses\":%d,\"dir\":%d,\"report\":%u,\"motor\":%u}\n",
         delay, pulses, dir, report, motor);
-    fflush(write_fp);
 
-    pthread_join(tid, NULL);
+    // wait for logging to finish
+    pthread_join(tid_log, NULL);
 
-    fclose(write_fp);
+    // cleanup
+    fclose(g_write_fp);
     fclose(read_fp);
     if (logf) fclose(logf);
     return 0;

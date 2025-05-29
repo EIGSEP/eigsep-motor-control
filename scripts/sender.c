@@ -23,15 +23,20 @@
 #define MICROSTEP     4
 #define GEAR_TEETH  113
 
-static FILE *g_write_fp = NULL;  
+// Raw FD for async-signal-safe STOP
+static int g_serial_fd = -1;
+
+// Signal handler: send STOP over raw FD, then exit immediately
 static void sigint_handler(int _) {
-    if (g_write_fp) {
-        fprintf(g_write_fp, "[\"STOP\"]\n");
-        fflush(g_write_fp);
+    if (g_serial_fd >= 0) {
+        const char *stop = "[\"STOP\"]\n";
+        write(g_serial_fd, stop, strlen(stop));
+        fsync(g_serial_fd);
     }
-    exit(0);
+    _exit(0);
 }
 
+// Scan existing log files to pick highest index and last count
 static void scan_logs(int *out_idx, int *out_off) {
     DIR *d = opendir(".");
     struct dirent *e;
@@ -61,7 +66,7 @@ static void scan_logs(int *out_idx, int *out_off) {
     char buf[128];
     while (fgets(buf, sizeof(buf), f)) {
         char *c = strchr(buf, ',');
-        if (c) last = atoi(c+1);
+        if (c) last = atoi(c + 1);
     }
     fclose(f);
 
@@ -69,6 +74,7 @@ static void scan_logs(int *out_idx, int *out_off) {
     *out_off = last;
 }
 
+// Print usage and exit
 static void usage(const char *p) {
     fprintf(stderr,
         "Usage: %s [options]\n"
@@ -88,6 +94,7 @@ static void usage(const char *p) {
     exit(1);
 }
 
+// Convert degrees to required pulse count
 static int calc_pulses(int deg) {
     return (int)(MICROSTEP * GEAR_TEETH * abs(deg) / STEP_ANGLE);
 }
@@ -101,6 +108,7 @@ typedef struct {
     int      index;
 } logger_args_t;
 
+// Logger thread: read STATUS lines, timestamp & write to rotating logs
 static void *logger_thread(void *arg) {
     logger_args_t *la = arg;
     char line[128];
@@ -110,6 +118,7 @@ static void *logger_thread(void *arg) {
         if (sscanf(line, "STATUS %d", &cnt) == 1) {
             int adj = la->offset + cnt;
 
+            // Rotate if file too large
             if (la->max_size > 0) {
                 struct stat st;
                 if (fstat(fileno(la->logf), &st)==0 &&
@@ -124,7 +133,7 @@ static void *logger_thread(void *arg) {
 
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            long long us = (long long)tv.tv_sec*1000000LL + tv.tv_usec;
+            long long us = (long long)tv.tv_sec * 1000000LL + tv.tv_usec;
             fprintf(la->logf, "%lld,%d\n", us, adj);
             fflush(la->logf);
 
@@ -134,6 +143,7 @@ static void *logger_thread(void *arg) {
     return NULL;
 }
 
+// Configure serial port: raw 115200 8N1
 static int configure_serial(int fd) {
     struct termios t;
     if (tcgetattr(fd, &t) < 0) { perror("tcgetattr"); return -1; }
@@ -171,45 +181,50 @@ int main(int argc, char **argv) {
     int c;
     while ((c = getopt_long(argc, argv, "t:e:a:r:m:s:ch", opts, NULL)) != -1) {
         switch (c) {
-            case 't': delay    = atoi(optarg);       break;
-            case 'e': deg_e    = atoi(optarg);       break;
-            case 'a': deg_a    = atoi(optarg);       break;
-            case 'r': report   = atoi(optarg);       break;
-            case 'm': max_size = strtoul(optarg,0,10); break;
-            case 's': dev      = optarg;             break;
-            case 'c': send_stop = 1;                 break;
+            case 't': delay     = atoi(optarg);         break;
+            case 'e': deg_e     = atoi(optarg);         break;
+            case 'a': deg_a     = atoi(optarg);         break;
+            case 'r': report    = atoi(optarg);         break;
+            case 'm': max_size  = strtoul(optarg,0,10); break;
+            case 's': dev       = optarg;               break;
+            case 'c': send_stop = 1;                    break;
             default:  usage(argv[0]);
         }
     }
 
+    // If only sending STOP, do so and exit immediately
     if (send_stop) {
         int fd = open(dev, O_RDWR | O_NOCTTY);
         if (fd < 0) { perror("open"); return 1; }
+        g_serial_fd = fd;
         configure_serial(fd);
-        FILE *w = fdopen(fd, "w");
-        fprintf(w, "[\"STOP\"]\n");
-        fflush(w);
-        fclose(w);
+        const char *stop = "[\"STOP\"]\n";
+        write(fd, stop, strlen(stop));
+        fsync(fd);
+        close(fd);
         return 0;
     }
 
+    // Else perform a move + logging
     int idx, offset;
     scan_logs(&idx, &offset);
 
     int fd_w = open(dev, O_RDWR | O_NOCTTY);
     if (fd_w < 0) { perror("open"); return 1; }
+    g_serial_fd = fd_w;
     if (configure_serial(fd_w) < 0) return 1;
 
-    int fd_r       = dup(fd_w);
+    int fd_r = dup(fd_w);
     FILE *write_fp = fdopen(fd_w, "w");
+    setvbuf(write_fp, NULL, _IONBF, 0);
     FILE *read_fp  = fdopen(fd_r, "r");
-    g_write_fp     = write_fp;
 
+    // Prepare rotating log file
     char logname[128];
     if (max_size > 0) {
         snprintf(logname, sizeof(logname), "step_log_%d.txt", idx);
         struct stat st;
-        if (stat(logname,&st)==0 && (size_t)st.st_size >= max_size) {
+        if (stat(logname,&st)==0 && (size_t)st.st_size>=max_size) {
             idx++;
             snprintf(logname, sizeof(logname), "step_log_%d.txt", idx);
         }
@@ -218,9 +233,9 @@ int main(int argc, char **argv) {
     }
     FILE *logf = fopen(logname, "a+");
 
-    int angle     = (deg_a!=0 ? deg_a : deg_e);
+    int angle     = deg_a != 0 ? deg_a : deg_e;
     int pulses    = calc_pulses(angle);
-    int dir       = (angle>=0 ? 1 : -1);
+    int dir       = angle >= 0 ? 1 : -1;
     int threshold = offset + pulses * dir;
 
     pthread_t tid;
@@ -234,7 +249,7 @@ int main(int argc, char **argv) {
     };
     pthread_create(&tid, NULL, logger_thread, &la);
 
-    unsigned motor = (deg_a!=0 ? 1U : 0U);
+    unsigned motor = deg_a != 0 ? 1U : 0U;
     fprintf(write_fp,
         "{\"delay\":%u,\"pulses\":%d,\"dir\":%d,\"report\":%u,\"motor\":%u}\n",
         delay, pulses, dir, report, motor);

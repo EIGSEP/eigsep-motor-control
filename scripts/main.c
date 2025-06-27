@@ -1,97 +1,93 @@
-/**
- * @file main.c
- * @brief Application entry point: USB serial command loop for stepper control.
- *
- * This program runs on a Raspberry Pi Pico, initializing two stepper motors
- * (elevation and azimuth). It waits for a USB serial connection, then listens
- * for JSON commands to move the motors by a specified number of pulses,
- * with user-defined step delay, direction, and status reporting frequency.
- * Supports an emergency STOP command to immediately halt motion.
- */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/timer.h"
 #include "motor.h"
 
-/**
- * @brief Main program loop.
- *
- * Initializes serial I/O, waits for USB UART connection, and configures two
- * Stepper instances for elevation and azimuth axes. Enters an infinite loop
- * reading lines from stdin, handling emergency STOP, parsing JSON commands,
- * executing step pulses with real-time STOP polling, and reporting positions.
- *
- * JSON command format:
- * @code
- * {"delay":<microseconds>,
- *  "pulses":<number_of_steps>,
- *  "dir":<1_or_-1>,
- *  "report":<status_interval_steps>,
- *  "motor":<0_for_elevation,_1_for_azimuth> }
- * @endcode
- *
- * @return Never returns under normal operation.
- */
+// Stepper instances (persist positions between commands)
+static Stepper elevation, azimuth;
+
+// Timer callback: fires every REPORT_INTERVAL_MS
+// Prints current absolute positions of both steppers
+bool status_timer_cb(repeating_timer_t *rt) {
+    printf("{\"pos_az\":%ld,\"pos_el\":%ld}\n",
+           (long)azimuth.position,
+           (long)elevation.position);
+    fflush(stdout);
+    return true;  // keep repeating
+}
+
 int main() {
-    /* Initialize all stdio, including USB serial */
+    // Initialize USB serial
     stdio_init_all();
-    /* Wait until the host opens the USB serial port */
     while (!stdio_usb_connected()) {
         sleep_ms(100);
     }
     printf("connected\n"); fflush(stdout);
 
-    /* Configure pin arrays for elevation and azimuth steppers */
+    // Configure stepper pins
     const uint elev_pins[5] = {21, 18, 0, 1, 19};
     const uint az_pins[5]   = {11, 12, 0, 1, 10};
-    Stepper elevation;
-    Stepper azimuth;
-    /* Initialize each Stepper struct with its GPIO configuration */
     stepper_init(&elevation,
         elev_pins[0], elev_pins[1], elev_pins[2], elev_pins[3], elev_pins[4]);
     stepper_init(&azimuth,
         az_pins[0], az_pins[1], az_pins[2], az_pins[3], az_pins[4]);
 
-    char buf[256];
-    /* Main command-processing loop */
-    while (true) {
-        /* Read a line from stdin (blocking) */
-        if (!fgets(buf, sizeof(buf), stdin)) continue;
+    // Start repeating timer (200 ms interval)
+    const uint32_t REPORT_INTERVAL_MS = 200;
+    repeating_timer_t timer;
+    add_repeating_timer_ms(REPORT_INTERVAL_MS,
+                           status_timer_cb,
+                           NULL,
+                           &timer);
 
-        /* Check for emergency STOP keyword */
+    // Main command loop (unchanged)
+    char buf[256];
+    while (true) {
+        if (!fgets(buf, sizeof(buf), stdin))
+            continue;
+
+        // Emergency STOP packet
         if (strstr(buf, "STOP")) {
             printf("EMERGENCY STOP\n"); fflush(stdout);
             continue;
         }
 
-        /* Parse JSON command fields into variables */
-        unsigned delay_us, pulses, report, motor_sel;
-        int dir;
+        // Parse JSON command
+        unsigned delay_us, pulses_az, pulses_el, report;
+        int dir_az, dir_el;
         if (sscanf(buf,
-            "{\"delay\":%u,\"pulses\":%u,\"dir\":%d,\"report\":%u,\"motor\":%u}",
-            &delay_us, &pulses, &dir, &report, &motor_sel) != 5) {
+            "{\"delay\":%u,\"pulses_az\":%u,\"dir_az\":%d,"
+            "\"pulses_el\":%u,\"dir_el\":%d,\"report\":%u}",
+            &delay_us, &pulses_az, &dir_az,
+            &pulses_el, &dir_el, &report) != 6) {
             printf("bad cmd: %s", buf); fflush(stdout);
             continue;
         }
 
-        /* Select the appropriate motor and set parameters */
-        Stepper *m = motor_sel ? &azimuth : &elevation;
-        m->delay_us = delay_us;
-        m->dir = (dir > 0 ? 1 : -1);
+        // Apply delay and direction
+        elevation.delay_us = azimuth.delay_us = delay_us;
+        elevation.dir     = dir_el > 0 ? 1 : -1;
+        azimuth.dir       = dir_az > 0 ? 1 : -1;
 
-        /* Step loop with periodic status reporting and STOP polling */
-        for (unsigned i = 1; i <= pulses; ++i) {
-            stepper_move(m);
-            if ((i % report) == 0) {
-                printf("STATUS %ld,%ld\n",
-                    (long)azimuth.position,
-                    (long)elevation.position);
-                fflush(stdout);
+        // Interleaved stepping
+        unsigned rem_az = pulses_az;
+        unsigned rem_el = pulses_el;
+        unsigned step_count = 0;
+        while ((rem_az | rem_el) > 0) {
+            if (rem_az > 0) {
+                stepper_move(&azimuth);
+                rem_az--;
             }
-            /* Non-blocking check for additional input (emergency STOP) */
+            if (rem_el > 0) {
+                stepper_move(&elevation);
+                rem_el--;
+            }
+            step_count++;
+
+            // Check for non-blocking emergency STOP
             int ch = getchar_timeout_us(0);
             if (ch != PICO_ERROR_TIMEOUT) {
                 printf("EMERGENCY STOP\n"); fflush(stdout);
@@ -99,14 +95,19 @@ int main() {
             }
         }
 
-        /* Final status report after motion completes or STOP */
-        printf("STATUS %ld,%ld\n",
-            (long)azimuth.position,
-            (long)elevation.position);
+        // Final position report after move/STOP
+        unsigned max_steps = pulses_az > pulses_el ? pulses_az : pulses_el;
+        printf("{\"step\":%u,\"pos_az\":%ld,\"pos_el\":%ld}\n",
+               max_steps,
+               (long)azimuth.position,
+               (long)elevation.position);
         fflush(stdout);
-        /* Disable motor until next command */
-        stepper_close(m);
+
+        // Disable coils until next command
+        stepper_close(&elevation);
+        stepper_close(&azimuth);
     }
+
     return 0;
 }
 

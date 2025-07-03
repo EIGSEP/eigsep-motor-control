@@ -41,9 +41,9 @@ class Stepper:
             deg (float): Angle in degrees to rotate.
 
         Returns:
-            float: Number of steps needed to rotate the specified angle.
+            int: Number of steps needed to rotate the specified angle.
         """
-        return (self.microstep * self.gear_teeth * abs(deg) / self.step_angle)
+        return int(round(self.microstep * self.gear_teeth * abs(deg) / self.step_angle))
 
     def calc_deg(self, step):
         """
@@ -120,9 +120,9 @@ class Stepper:
         raw = self.ser.readline().decode('utf-8').strip()
         try:
             data = json.loads(raw)
-            print(f"Azimuth step={data['pos_az']}, Elevation step={data['pos_el']}")
+            logging.info(f"Azimuth step={data['pos_az']}, Elevation step={data['pos_el']}")
         except json.JSONDecodeError:
-            print('Received:', raw)
+            logging.warning(f"Received invalid JSON: {raw}")
 
     def stop(self):
         """

@@ -28,8 +28,8 @@ int main() {
     printf("connected\n"); fflush(stdout);
 
     // Configure stepper pins
-    const uint elev_pins[5] = {21, 18, 0, 1, 19};
-    const uint az_pins[5]   = {11, 12, 0, 1, 10};
+    const uint elev_pins[5] = {7, 5, 0, 1, 6};
+    const uint az_pins[5]   = {10, 8, 0, 1, 9};
     stepper_init(&elevation,
         elev_pins[0], elev_pins[1], elev_pins[2], elev_pins[3], elev_pins[4]);
     stepper_init(&azimuth,

@@ -70,19 +70,45 @@ class Stepper:
         """
         pulses = self.calc_step(deg)
         dir_el = 1 if deg > 0 else -1
+        self._send_move_command(delay, pulses_az, dir_az, pulses, dir_el, rep)
 
+    def move_az(self, deg, delay=225, pulses_el=0, dir_el=1, rep=100):
+        """
+        Send a command to move the stepper motor in azimuth.
+
+        Args:
+            deg (float): Degrees to move in azimuth (positive or negative).
+            delay (int, optional): Delay between pulses (default 225).
+            pulses_el (int, optional): Elevation pulses (default 0).
+            dir_el (int, optional): Elevation direction (default 1).
+            rep (int, optional): Report frequency or repetition count (default 100).
+        """
+        pulses = self.calc_step(deg)
+        dir_az = 1 if deg > 0 else -1
+        self._send_move_command(delay, pulses, dir_az, pulses_el, dir_el, rep)
+
+    def _send_move_command(self, delay, pulses_az, dir_az, pulses_el, dir_el, rep):
+        """
+        Helper method to send a movement command to the stepper motor.
+
+        Args:
+            delay (int): Delay between pulses.
+            pulses_az (int): Azimuth pulses.
+            dir_az (int): Azimuth direction.
+            pulses_el (int): Elevation pulses.
+            dir_el (int): Elevation direction.
+            rep (int): Report frequency or repetition count.
+        """
         cmd = {
             "delay": delay,
             "pulses_az": pulses_az,
             "dir_az": dir_az,
-            "pulses_el": pulses,
+            "pulses_el": pulses_el,
             "dir_el": dir_el,
             "report": rep
         }
         line = json.dumps(cmd) + "\n"
         self.ser.write(line.encode('utf-8'))
-
-    def move_az(self, deg, delay=225, pulses_el=0, dir_el=1, rep=100):
         """
         Send a command to move the stepper motor in azimuth.
 
